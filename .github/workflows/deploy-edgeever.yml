@@ -1,0 +1,100 @@
+name: Deploy EdgeEver
+
+# 每次 Fork 的 main 有推送（包括 Update deployed EdgeEver 同步上游后）
+# 就自动构建并部署到 Cloudflare Worker。完全不需要人工介入。
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: 手动触发原因（可留空）
+        required: false
+        default: manual
+
+permissions:
+  contents: read
+
+concurrency:
+  group: edgeever-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Build and deploy Worker
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      EDGE_EVER_WORKER_NAME: edgeever
+      EDGE_EVER_WORKERS_DEV: "true"
+      EDGE_EVER_D1_DATABASE_NAME: edgeever
+      EDGE_EVER_D1_DATABASE_ID: 1aefda65-49c6-4bfa-8722-5ae2bbb284cc
+      EDGE_EVER_R2_BUCKET_NAME: edgeever-resources
+      EDGE_EVER_R2_PREVIEW_BUCKET_NAME: edgeever-resources-preview
+      EDGE_EVER_AUTH_USERNAME: yannyn
+      EDGE_EVER_SESSION_TTL_DAYS: "400"
+      EDGE_EVER_DEMO_MODE: "false"
+      EDGE_EVER_USE_EXISTING_AUTH_SECRET: "true"
+      EDGE_EVER_DEPLOYMENT_TRIGGER: ${{ github.event_name == 'push' && 'main_push' || 'manual' }}
+      EDGE_EVER_DEPLOYMENT_METHOD: "github_actions"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Apply D1 migrations
+        run: bun run db:migrate:remote
+
+      - name: Build web and worker
+        run: bun run build:cloudflare
+
+      - name: Deploy Worker
+        run: bun run deploy:worker
+
+      - name: Verify deployment
+        run: bun run deploy:verify
+        continue-on-error: true
+
+      - name: Report health
+        if: always()
+        run: |
+          set -euo pipefail
+          url="https://edgeever.edgeever-qyx.workers.dev/api/health"
+          for attempt in 1 2 3 4 5; do
+            body="$(curl -fsS --max-time 20 "${url}" || true)"
+            if [ -n "${body}" ]; then
+              echo "${body}"
+              echo "${body}" > /tmp/health.json
+              break
+            fi
+            sleep 10
+          done
+          {
+            echo "### EdgeEver 部署结果"
+            echo ""
+            if [ -f /tmp/health.json ]; then
+              echo '```json'
+              cat /tmp/health.json
+              echo '```'
+            else
+              echo "健康检查未返回结果，请查看上方日志。"
+            fi
+            echo ""
+            echo "- 提交：\`${GITHUB_SHA:0:12}\`"
+            echo "- 站点：https://edgeever.edgeever-qyx.workers.dev"
+          } >> "${GITHUB_STEP_SUMMARY}"
