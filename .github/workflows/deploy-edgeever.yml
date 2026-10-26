@@ -7,6 +7,13 @@ on:
   push:
     branches:
       - main
+  # 关键：Update deployed EdgeEver 用 GITHUB_TOKEN 推送，GitHub 不会因此触发
+  # 其它工作流的 push 事件。workflow_run 是唯一可靠的接力方式。
+  workflow_run:
+    workflows:
+      - Update deployed EdgeEver
+    types:
+      - completed
   workflow_dispatch:
     inputs:
       reason:
@@ -24,6 +31,8 @@ concurrency:
 jobs:
   deploy:
     name: Build and deploy Worker
+    # 同步工作流失败时不要部署；成功或手动触发才继续。
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
